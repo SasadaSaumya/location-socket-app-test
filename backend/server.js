@@ -9,6 +9,52 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
+
+// Logs every single HTTP request that reaches this Express app, before
+// anything else runs, static files, catch-alls, or API routes included.
+// This is the important part for diagnosing routing issues, if a request
+// for /api/config never shows up in this log, it means the request never
+// reached this process at all (wrong host, wrong port, a reverse proxy
+// intercepting it, or a completely different running process answering
+// instead). If it DOES show up here but the response is still HTML, the
+// problem is route order below, something above app.get('/api/config')
+// is catching it first.
+app.use((req, res, next) => {
+    console.log(`[http] ${req.method} ${req.originalUrl}`);
+    next();
+});
+
+// Lets the mobile app pull the Google API key at runtime instead of having
+// it baked into the app bundle at build time. Note this is not a security
+// boundary on its own, any device that calls this endpoint can read the
+// key back out, it just keeps it out of source control and out of the
+// compiled app binary. If you want the key to never leave this server at
+// all, the stronger move is proxying the actual Places requests through a
+// backend route instead of handing the key to the client.
+//
+// Registered BEFORE express.static() and BEFORE the socket.io setup below
+// on purpose, in Express, whichever matching handler is registered first
+// wins, so this must come before any static-file serving or catch-all
+// route that might otherwise swallow the request and serve index.html.
+app.get('/api/config', (req, res) => {
+    console.log('[api/config] request received');
+
+    if (!GOOGLE_API_KEY) {
+        console.log('[api/config] GOOGLE_API_KEY is not set, responding 500');
+        res.status(500).json({ error: 'Google API key is not configured on the server.' });
+        return;
+    }
+
+    // Log only that a key exists and its length, never the key itself, so
+    // this log stays safe to leave on in production.
+    console.log(`[api/config] sending key (length ${GOOGLE_API_KEY.length})`);
+    res.json({ googleApiKey: GOOGLE_API_KEY });
+});
+
+// Static frontend files (and, if you have one, a SPA catch-all) come
+// AFTER the API routes above, so a request for /api/config is already
+// handled by the time Express would otherwise fall back to serving
+// index.html for an unrecognized path.
 app.use(express.static('public'));
 
 const server = http.createServer(app);
@@ -19,21 +65,6 @@ const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 if (!GOOGLE_API_KEY) {
     console.error('no api key');
 }
-
-// Lets the mobile app pull the Google API key at runtime instead of having
-// it baked into the app bundle at build time. Note this is not a security
-// boundary on its own, any device that calls this endpoint can read the
-// key back out, it just keeps it out of source control and out of the
-// compiled app binary. If you want the key to never leave this server at
-// all, the stronger move is proxying the actual Places requests through a
-// backend route instead of handing the key to the client.
-app.get('/api/config', (req, res) => {
-    if (!GOOGLE_API_KEY) {
-        res.status(500).json({ error: 'Google API key is not configured on the server.' });
-        return;
-    }
-    res.json({ googleApiKey: GOOGLE_API_KEY });
-});
 
 io.on('connection', (socket) => {
     console.log(`socket connected: ${socket.id}`);
@@ -152,11 +183,11 @@ io.on('connection', (socket) => {
         }
     });
 
-    // New event. The mobile app's "Use My Location" flow resolves nearby
-    // places on the device itself, straight from Google's nearbysearch
-    // endpoint, so it already has name, lat, and lng with no placeId round
-    // trip needed. This event just takes that and caches it, the same way
-    // get_location does after a live Google fetch.
+    // The mobile app's "Use My Location" flow resolves nearby places on the
+    // device itself, straight from Google's nearbysearch endpoint, so it
+    // already has name, lat, and lng with no placeId round trip needed.
+    // This event just takes that and caches it, the same way get_location
+    // does after a live Google fetch.
     socket.on('save_location', async (payload) => {
         const name = payload && payload.name;
         const lat = payload && payload.lat;
@@ -221,4 +252,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`Open http://localhost:${PORT}`);
+    console.log(`Config endpoint: http://localhost:${PORT}/api/config`);
 });
