@@ -137,6 +137,53 @@ io.on('connection', (socket) => {
         }
     });
 
+    // New event. The mobile app's "Use My Location" flow resolves nearby
+    // places on the device itself, straight from Google's nearbysearch
+    // endpoint, so it already has name, lat, and lng with no placeId round
+    // trip needed. This event just takes that and caches it, the same way
+    // get_location does after a live Google fetch.
+    socket.on('save_location', async (payload) => {
+        const name = payload && payload.name;
+        const lat = payload && payload.lat;
+        const lng = payload && payload.lng;
+
+        if (!name || typeof lat !== 'number' || typeof lng !== 'number') {
+            socket.emit('location_error', 'save_location needs a name, a numeric lat, and a numeric lng.');
+            return;
+        }
+
+        try {
+            console.log(`save req: "${name}" (${lat}, ${lng})`);
+
+            // ON CONFLICT DO NOTHING here means a place already saved by
+            // this or another client just gets skipped quietly, no error,
+            // no duplicate row, matching how get_location already behaves.
+            await db.query(
+                `INSERT INTO locations (place_name, latitude, longitude)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (place_name) DO NOTHING`,
+                [name, lat, lng]
+            );
+            console.log('db saved (or already existed).');
+
+            // push the fresh full list to everyone, same as get_location
+            const all = await db.query(
+                'SELECT id, place_name, latitude, longitude, created_at FROM locations ORDER BY created_at DESC'
+            );
+            io.emit('all_locations_result', all.rows);
+
+            socket.emit('location_result', {
+                name,
+                lat,
+                lng,
+                source: 'nearby search (client-side Google API)'
+            });
+        } catch (error) {
+            console.error('error saving location:', error.message);
+            socket.emit('location_error', 'Something went wrong while saving that location.');
+        }
+    });
+
     // sends the full cached table, called on connect and on demand
     socket.on('get_all_locations', async () => {
         try {
