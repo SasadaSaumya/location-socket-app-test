@@ -39,6 +39,14 @@ app.use((req, res, next) => {
 app.get('/api/config', (req, res) => {
     console.log('[api/config] request received');
 
+    // Nothing about this response is cacheable, the whole reason it's
+    // fetched at runtime instead of hardcoded is so the key can be rotated
+    // without an app update. Without this header, the original response
+    // had no explicit caching instructions at all, which some HTTP clients
+    // (and CDNs) will still cache based on heuristics like Last-Modified,
+    // exactly the stale-HTML symptom seen while debugging this endpoint.
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+
     if (!GOOGLE_API_KEY) {
         console.log('[api/config] GOOGLE_API_KEY is not set, responding 500');
         res.status(500).json({ error: 'Google API key is not configured on the server.' });
