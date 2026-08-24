@@ -20,6 +20,21 @@ if (!GOOGLE_API_KEY) {
     console.error('no api key');
 }
 
+// Lets the mobile app pull the Google API key at runtime instead of having
+// it baked into the app bundle at build time. Note this is not a security
+// boundary on its own, any device that calls this endpoint can read the
+// key back out, it just keeps it out of source control and out of the
+// compiled app binary. If you want the key to never leave this server at
+// all, the stronger move is proxying the actual Places requests through a
+// backend route instead of handing the key to the client.
+app.get('/api/config', (req, res) => {
+    if (!GOOGLE_API_KEY) {
+        res.status(500).json({ error: 'Google API key is not configured on the server.' });
+        return;
+    }
+    res.json({ googleApiKey: GOOGLE_API_KEY });
+});
+
 io.on('connection', (socket) => {
     console.log(`socket connected: ${socket.id}`);
 
