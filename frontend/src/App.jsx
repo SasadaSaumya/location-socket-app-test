@@ -15,6 +15,53 @@ function App() {
   const [disabled, setDisabled] = useState(false);
   const [allLocations, setAllLocations] = useState([]);
 
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [apiKeyStatus, setApiKeyStatus] = useState(null); // { isSet, length }
+  const [apiKeySaving, setApiKeySaving] = useState(false);
+  const [apiKeyMessage, setApiKeyMessage] = useState('');
+  const [apiKeyError, setApiKeyError] = useState('');
+
+  function refreshApiKeyStatus() {
+    fetch('/api/config/status')
+      .then((res) => res.json())
+      .then((data) => setApiKeyStatus(data))
+      .catch(() => {});
+  }
+
+  useEffect(() => {
+    refreshApiKeyStatus();
+  }, []);
+
+  function handleSaveApiKey(e) {
+    e.preventDefault();
+    const key = apiKeyInput.trim();
+
+    setApiKeyMessage('');
+    setApiKeyError('');
+
+    if (!key) {
+      setApiKeyError('Enter a Google API key first.');
+      return;
+    }
+
+    setApiKeySaving(true);
+
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ googleApiKey: key })
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to save the API key.');
+        setApiKeyMessage('Google API key saved.');
+        setApiKeyInput('');
+        refreshApiKeyStatus();
+      })
+      .catch((err) => setApiKeyError(err.message))
+      .finally(() => setApiKeySaving(false));
+  }
+
   useEffect(() => {
     const socket = io(SOCKET_URL);
     socketRef.current = socket;
@@ -84,6 +131,36 @@ function App() {
   return (
     <div>
       <h2>Test Find Location Coordinates</h2>
+
+      <fieldset style={{ width: 340, marginBottom: 20 }}>
+        <legend>Google API Key</legend>
+
+        <p style={{ margin: '4px 0' }}>
+          Status:{' '}
+          {apiKeyStatus === null
+            ? 'Checking...'
+            : apiKeyStatus.isSet
+            ? `Set (${apiKeyStatus.length} characters)`
+            : 'Not set'}
+        </p>
+
+        <form onSubmit={handleSaveApiKey} style={{ display: 'flex', gap: 6 }}>
+          <input
+            type="password"
+            value={apiKeyInput}
+            onChange={(e) => setApiKeyInput(e.target.value)}
+            placeholder="Enter GOOGLE_API_KEY"
+            autoComplete="off"
+            style={{ height: 30, flex: 1 }}
+          />
+          <button type="submit" disabled={apiKeySaving} style={{ height: 34 }}>
+            {apiKeySaving ? 'Saving...' : 'Save'}
+          </button>
+        </form>
+
+        {apiKeyMessage && <p style={{ color: 'green', margin: '4px 0' }}>{apiKeyMessage}</p>}
+        {apiKeyError && <p style={{ color: 'red', margin: '4px 0' }}>{apiKeyError}</p>}
+      </fieldset>
 
       <input
         type="text"

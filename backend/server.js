@@ -1,6 +1,8 @@
 const express = require('express');
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 const axios = require('axios');
 const cors = require('cors');
@@ -9,6 +11,40 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+
+const ENV_PATH = path.join(__dirname, '.env');
+
+// Writes (or updates) the GOOGLE_API_KEY line in the .env file so the key
+// set from the frontend survives a server restart, without touching any
+// other variables already in the file.
+function persistGoogleApiKey(key) {
+    let contents = '';
+    try {
+        contents = fs.readFileSync(ENV_PATH, 'utf8');
+    } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+    }
+
+    const line = `GOOGLE_API_KEY=${key}`;
+    const lines = contents.split(/\r?\n/);
+    let found = false;
+
+    const updated = lines.map((l) => {
+        if (/^\s*GOOGLE_API_KEY\s*=/.test(l)) {
+            found = true;
+            return line;
+        }
+        return l;
+    });
+
+    if (!found) {
+        if (updated.length > 0 && updated[updated.length - 1] === '') updated.pop();
+        updated.push(line);
+    }
+
+    fs.writeFileSync(ENV_PATH, updated.join('\n') + '\n');
+}
 
 // Logs every single HTTP request that reaches this Express app, before
 // anything else runs, static files, catch-alls, or API routes included.
@@ -59,6 +95,39 @@ app.get('/api/config', (req, res) => {
     res.json({ googleApiKey: GOOGLE_API_KEY });
 });
 
+// Lets the frontend "Set Google API Key" form save a new key without
+// touching the server filesystem by hand. Updates the in-memory key used by
+// every socket handler immediately, and persists it to .env so it survives
+// a restart. Only reports whether a key is set and its length, never the
+// key value itself, so it's safe to poll on page load.
+app.get('/api/config/status', (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({
+        isSet: Boolean(GOOGLE_API_KEY),
+        length: GOOGLE_API_KEY ? GOOGLE_API_KEY.length : 0
+    });
+});
+
+app.post('/api/config', (req, res) => {
+    const key = req.body && typeof req.body.googleApiKey === 'string' ? req.body.googleApiKey.trim() : '';
+
+    if (!key) {
+        res.status(400).json({ error: 'googleApiKey is required.' });
+        return;
+    }
+
+    try {
+        persistGoogleApiKey(key);
+        GOOGLE_API_KEY = key;
+        process.env.GOOGLE_API_KEY = key;
+        console.log(`[api/config] GOOGLE_API_KEY updated (length ${key.length})`);
+        res.json({ ok: true, length: key.length });
+    } catch (error) {
+        console.error('error saving GOOGLE_API_KEY:', error.message);
+        res.status(500).json({ error: 'Failed to save the API key on the server.' });
+    }
+});
+
 // Static frontend files (and, if you have one, a SPA catch-all) come
 // AFTER the API routes above, so a request for /api/config is already
 // handled by the time Express would otherwise fall back to serving
@@ -68,7 +137,7 @@ app.use(express.static('public'));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+let GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
 if (!GOOGLE_API_KEY) {
     console.error('no api key');
