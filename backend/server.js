@@ -128,6 +128,110 @@ app.post('/api/config', (req, res) => {
     }
 });
 
+// Snaps a recorded GPS trace from the mobile app onto the nearest real road
+// in osm_roads (imported from the Sri Lanka OSM extract, see
+// backend/sql/road_directions.sql for the import steps), then records the
+// user's one-way/two-way report against that road's OSM way id. Multiple
+// reports can exist for the same way, direction is resolved as a majority
+// vote below rather than trusting whichever report came in last.
+app.post('/api/road-trace', async (req, res) => {
+    const points = Array.isArray(req.body && req.body.points) ? req.body.points : null;
+    const direction = req.body && req.body.direction;
+
+    if (!points || points.length < 2) {
+        res.status(400).json({ error: 'points must be an array of at least 2 {lat,lng} entries.' });
+        return;
+    }
+    if (direction !== 'one_way' && direction !== 'two_way') {
+        res.status(400).json({ error: 'direction must be "one_way" or "two_way".' });
+        return;
+    }
+
+    const MAX_MATCH_DISTANCE_M = 60;
+    const lineWkt = `LINESTRING(${points.map((p) => `${p.lng} ${p.lat}`).join(', ')})`;
+
+    try {
+        const match = await db.query(
+            `SELECT osm_id, name,
+                    ST_Distance(geom::geography, ST_SetSRID(ST_GeomFromText($1), 4326)::geography) AS distance_m
+             FROM osm_roads
+             ORDER BY geom <-> ST_SetSRID(ST_GeomFromText($1), 4326)
+             LIMIT 1`,
+            [lineWkt]
+        );
+
+        if (match.rows.length === 0 || match.rows[0].distance_m > MAX_MATCH_DISTANCE_M) {
+            console.log(`[road-trace] no confident match within ${MAX_MATCH_DISTANCE_M}m`);
+            res.json({ matched: false });
+            return;
+        }
+
+        const { osm_id: osmWayId, name, distance_m: distanceM } = match.rows[0];
+
+        await db.query(
+            'INSERT INTO road_direction_reports (osm_way_id, direction, distance_m) VALUES ($1, $2, $3)',
+            [osmWayId, direction, distanceM]
+        );
+
+        const tally = await db.query(
+            `SELECT direction, COUNT(*) AS count, MAX(reported_at) AS last_reported_at
+             FROM road_direction_reports
+             WHERE osm_way_id = $1
+             GROUP BY direction
+             ORDER BY count DESC, last_reported_at DESC`,
+            [osmWayId]
+        );
+
+        console.log(`[road-trace] matched "${name}" (way ${osmWayId}), ${distanceM.toFixed(1)}m away`);
+
+        res.json({
+            matched: true,
+            osmWayId,
+            name: name || null,
+            distanceM,
+            consensus: tally.rows[0].direction,
+            reportCount: tally.rows.reduce((sum, row) => sum + Number(row.count), 0)
+        });
+    } catch (error) {
+        console.error('error matching road trace:', error.message);
+        res.status(500).json({ error: 'Failed to match this trace against the road network.' });
+    }
+});
+
+// Every road that has at least one direction report, with its geometry, so
+// the mobile app can render already-tagged roads on the map. Aggregation
+// mirrors the majority-vote logic in POST /api/road-trace above.
+app.get('/api/road-directions', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT r.osm_id, r.name, ST_AsGeoJSON(r.geom) AS geometry,
+                    tally.direction AS consensus, tally.report_count
+             FROM osm_roads r
+             JOIN LATERAL (
+                 SELECT direction, COUNT(*) AS report_count, MAX(reported_at) AS last_reported_at
+                 FROM road_direction_reports
+                 WHERE osm_way_id = r.osm_id
+                 GROUP BY direction
+                 ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
+                 LIMIT 1
+             ) tally ON true`
+        );
+
+        res.json(
+            result.rows.map((row) => ({
+                osmWayId: row.osm_id,
+                name: row.name,
+                geometry: JSON.parse(row.geometry),
+                consensus: row.consensus,
+                reportCount: Number(row.report_count)
+            }))
+        );
+    } catch (error) {
+        console.error('error fetching road directions:', error.message);
+        res.status(500).json({ error: 'Failed to load tagged roads.' });
+    }
+});
+
 // Static frontend files (and, if you have one, a SPA catch-all) come
 // AFTER the API routes above, so a request for /api/config is already
 // handled by the time Express would otherwise fall back to serving
