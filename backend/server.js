@@ -151,11 +151,15 @@ app.post('/api/road-trace', async (req, res) => {
     const lineWkt = `LINESTRING(${points.map((p) => `${p.lng} ${p.lat}`).join(', ')})`;
 
     try {
+        // osm_roads.geom is stored in SRID 3857 (what osm2pgsql's flex output
+        // produces), so the input line is reprojected to 3857 rather than
+        // transforming every row, that way the <-> KNN search can still use
+        // idx_osm_roads_geom instead of falling back to a full table scan.
         const match = await db.query(
-            `SELECT osm_id, name,
-                    ST_Distance(geom::geography, ST_SetSRID(ST_GeomFromText($1), 4326)::geography) AS distance_m
+            `SELECT way_id, name,
+                    ST_Distance(geom, ST_Transform(ST_SetSRID(ST_GeomFromText($1), 4326), 3857)) AS distance_m
              FROM osm_roads
-             ORDER BY geom <-> ST_SetSRID(ST_GeomFromText($1), 4326)
+             ORDER BY geom <-> ST_Transform(ST_SetSRID(ST_GeomFromText($1), 4326), 3857)
              LIMIT 1`,
             [lineWkt]
         );
@@ -166,7 +170,7 @@ app.post('/api/road-trace', async (req, res) => {
             return;
         }
 
-        const { osm_id: osmWayId, name, distance_m: distanceM } = match.rows[0];
+        const { way_id: osmWayId, name, distance_m: distanceM } = match.rows[0];
 
         await db.query(
             'INSERT INTO road_direction_reports (osm_way_id, direction, distance_m) VALUES ($1, $2, $3)',
@@ -204,13 +208,13 @@ app.post('/api/road-trace', async (req, res) => {
 app.get('/api/road-directions', async (req, res) => {
     try {
         const result = await db.query(
-            `SELECT r.osm_id, r.name, ST_AsGeoJSON(r.geom) AS geometry,
+            `SELECT r.way_id, r.name, ST_AsGeoJSON(ST_Transform(r.geom, 4326)) AS geometry,
                     tally.direction AS consensus, tally.report_count
              FROM osm_roads r
              JOIN LATERAL (
                  SELECT direction, COUNT(*) AS report_count, MAX(reported_at) AS last_reported_at
                  FROM road_direction_reports
-                 WHERE osm_way_id = r.osm_id
+                 WHERE osm_way_id = r.way_id
                  GROUP BY direction
                  ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
                  LIMIT 1
@@ -219,7 +223,7 @@ app.get('/api/road-directions', async (req, res) => {
 
         res.json(
             result.rows.map((row) => ({
-                osmWayId: row.osm_id,
+                osmWayId: row.way_id,
                 name: row.name,
                 geometry: JSON.parse(row.geometry),
                 consensus: row.consensus,
