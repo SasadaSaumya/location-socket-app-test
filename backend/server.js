@@ -315,7 +315,7 @@ app.get('/api/directions', async (req, res) => {
                     SUM(d.cost) AS total_cost_m
              FROM pgr_dijkstra(
                  'SELECT way_id AS id, source, target, cost, reverse_cost FROM osm_roads',
-                 $1, $2
+                 $1::bigint, $2::bigint
              ) d
              JOIN osm_roads r ON r.way_id = d.edge
              WHERE d.edge != -1`,
