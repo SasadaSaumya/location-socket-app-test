@@ -236,6 +236,114 @@ app.get('/api/road-directions', async (req, res) => {
     }
 });
 
+// Free-text place -> {lat, lng, address} via the public OSM Nominatim
+// geocoder (no API key, no Google). Nominatim's usage policy caps this at
+// ~1 request/sec and asks for an identifying User-Agent, both fine for this
+// app's traffic. countrycodes biases ambiguous names (more than one
+// "Galle" exists) toward Sri Lanka without hard-restricting to it.
+async function geocode(place) {
+    const response = await axios.get('https://nominatim.openstreetmap.org/search', {
+        params: {
+            q: place,
+            format: 'json',
+            limit: 1,
+            countrycodes: 'lk'
+        },
+        headers: { 'User-Agent': 'location-socket-app-test/1.0 (https://test.servefamily.com)' }
+    });
+
+    const hit = response.data[0];
+    if (!hit) return null;
+
+    return { lat: Number(hit.lat), lng: Number(hit.lon), address: hit.display_name };
+}
+
+// Nearest osm_roads_vertices_pgr node to a lat/lng, so a geocoded point
+// (which rarely sits exactly on a road) has a graph node to route from/to.
+async function nearestVertex(lat, lng) {
+    const result = await db.query(
+        `SELECT id
+         FROM osm_roads_vertices_pgr
+         ORDER BY geom <-> ST_Transform(ST_SetSRID(ST_MakePoint($1, $2), 4326), 3857)
+         LIMIT 1`,
+        [lng, lat]
+    );
+    return result.rows[0] ? result.rows[0].id : null;
+}
+
+// Turns two free-text places (e.g. "Colombo" / "Galle") into a driving
+// route, entirely on our own infrastructure: Nominatim (free OSM geocoder)
+// resolves the place names, then pgRouting's Dijkstra implementation finds
+// the shortest path over the osm_roads network already imported into
+// Postgres for the tagged-roads map (see backend/sql/road_directions.sql).
+// osm_roads.cost/reverse_cost were pre-computed from geometry length and
+// the OSM oneway tag by backend/sql/road_routing_topology.sql, so a
+// one-way street the wrong direction is simply very expensive to traverse.
+app.get('/api/directions', async (req, res) => {
+    const origin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
+    const destination = typeof req.query.destination === 'string' ? req.query.destination.trim() : '';
+
+    if (!origin || !destination) {
+        res.status(400).json({ error: 'origin and destination query params are required.' });
+        return;
+    }
+
+    try {
+        const [originPoint, destPoint] = await Promise.all([geocode(origin), geocode(destination)]);
+
+        if (!originPoint) {
+            res.status(404).json({ error: `Could not find "${origin}".` });
+            return;
+        }
+        if (!destPoint) {
+            res.status(404).json({ error: `Could not find "${destination}".` });
+            return;
+        }
+
+        const [startVid, endVid] = await Promise.all([
+            nearestVertex(originPoint.lat, originPoint.lng),
+            nearestVertex(destPoint.lat, destPoint.lng)
+        ]);
+
+        if (startVid === null || endVid === null) {
+            res.status(404).json({ error: 'No road network node found near one of those places.' });
+            return;
+        }
+
+        const route = await db.query(
+            `SELECT ST_AsGeoJSON(ST_LineMerge(ST_Transform(ST_Collect(r.geom ORDER BY d.seq), 4326))) AS geometry,
+                    SUM(d.cost) AS total_cost_m
+             FROM pgr_dijkstra(
+                 'SELECT way_id AS id, source, target, cost, reverse_cost FROM osm_roads',
+                 $1, $2
+             ) d
+             JOIN osm_roads r ON r.way_id = d.edge
+             WHERE d.edge != -1`,
+            [startVid, endVid]
+        );
+
+        if (route.rows.length === 0 || !route.rows[0].geometry) {
+            console.log(`[directions] "${origin}" -> "${destination}": no path in road network`);
+            res.status(404).json({ error: 'No route found between these places on the mapped road network.' });
+            return;
+        }
+
+        console.log(`[directions] "${origin}" -> "${destination}": ${(route.rows[0].total_cost_m / 1000).toFixed(1)}km`);
+
+        res.json({
+            distanceKm: Number((route.rows[0].total_cost_m / 1000).toFixed(1)),
+            startAddress: originPoint.address,
+            endAddress: destPoint.address,
+            startLocation: { lat: originPoint.lat, lng: originPoint.lng },
+            endLocation: { lat: destPoint.lat, lng: destPoint.lng },
+            geometry: JSON.parse(route.rows[0].geometry)
+        });
+    } catch (error) {
+        console.error('error fetching directions:', error.message);
+        res.status(500).json({ error: 'Failed to fetch directions.' });
+    }
+});
+
 // Static frontend files (and, if you have one, a SPA catch-all) come
 // AFTER the API routes above, so a request for /api/config is already
 // handled by the time Express would otherwise fall back to serving
