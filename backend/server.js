@@ -274,11 +274,15 @@ async function nearestVertex(lat, lng) {
 // Turns two free-text places (e.g. "Colombo" / "Galle") into a driving
 // route, entirely on our own infrastructure: Nominatim (free OSM geocoder)
 // resolves the place names, then pgRouting's Dijkstra implementation finds
-// the shortest path over the osm_roads network already imported into
-// Postgres for the tagged-roads map (see backend/sql/road_directions.sql).
-// osm_roads.cost/reverse_cost were pre-computed from geometry length and
-// the OSM oneway tag by backend/sql/road_routing_topology.sql, so a
-// one-way street the wrong direction is simply very expensive to traverse.
+// the shortest path over osm_roads_edges, a routing graph built from the
+// same osm_roads network used for the tagged-roads map (see
+// backend/sql/road_directions.sql) but split into a separate table at
+// every real shared OSM node, not just each road's own endpoints -
+// otherwise a road that simply passes through a junction (the common case)
+// never gets a graph node there. See backend/sql/road_routing_topology.sql.
+// cost/reverse_cost were derived from geometry length and the OSM oneway
+// tag, so a one-way street the wrong direction is simply very expensive to
+// traverse rather than hard-blocked.
 app.get('/api/directions', async (req, res) => {
     const origin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
     const destination = typeof req.query.destination === 'string' ? req.query.destination.trim() : '';
@@ -314,10 +318,10 @@ app.get('/api/directions', async (req, res) => {
             `SELECT ST_AsGeoJSON(ST_LineMerge(ST_Transform(ST_Collect(r.geom ORDER BY d.seq), 4326))) AS geometry,
                     SUM(d.cost) AS total_cost_m
              FROM pgr_dijkstra(
-                 'SELECT way_id AS id, source, target, cost, reverse_cost FROM osm_roads',
+                 'SELECT edge_id AS id, source, target, cost, reverse_cost FROM osm_roads_edges',
                  $1::bigint, $2::bigint
              ) d
-             JOIN osm_roads r ON r.way_id = d.edge
+             JOIN osm_roads_edges r ON r.edge_id = d.edge
              WHERE d.edge != -1`,
             [startVid, endVid]
         );
