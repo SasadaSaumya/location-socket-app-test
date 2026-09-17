@@ -454,10 +454,14 @@ io.on('connection', (socket) => {
             const { lat, lng } = response.data.result.geometry.location;
             console.log(`google resolved: lat ${lat}, lng ${lng}`);
 
+            // No target on ON CONFLICT here so it catches a conflict on
+            // EITHER unique constraint: place_name, or the exact same
+            // (latitude, longitude) already saved under different name
+            // text (e.g. "Galle" vs "Galle, Sri Lanka" are the same spot).
             await db.query(
                 `INSERT INTO locations (place_name, latitude, longitude)
                  VALUES ($1, $2, $3)
-                 ON CONFLICT (place_name) DO NOTHING`,
+                 ON CONFLICT DO NOTHING`,
                 [placeName, lat, lng]
             );
             console.log('db cached for next time.');
@@ -498,13 +502,14 @@ io.on('connection', (socket) => {
         try {
             console.log(`save req: "${name}" (${lat}, ${lng})`);
 
-            // ON CONFLICT DO NOTHING here means a place already saved by
-            // this or another client just gets skipped quietly, no error,
-            // no duplicate row, matching how get_location already behaves.
+            // No target on ON CONFLICT: a place already saved by this or
+            // another client (matched by name OR by this exact coordinate
+            // already existing under different name text) is skipped
+            // quietly, no error, no duplicate row.
             await db.query(
                 `INSERT INTO locations (place_name, latitude, longitude)
                  VALUES ($1, $2, $3)
-                 ON CONFLICT (place_name) DO NOTHING`,
+                 ON CONFLICT DO NOTHING`,
                 [name, lat, lng]
             );
             console.log('db saved (or already existed).');
