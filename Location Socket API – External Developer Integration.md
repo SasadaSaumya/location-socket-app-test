@@ -328,12 +328,20 @@ fetch('https://test.servefamily.com/api/road-directions')
 
 ## 1.6 `GET /api/directions`
 
-Turns two free-text place names (e.g. `"Colombo"` → `"Galle"`) into a
-driving route — **entirely free and self-hosted, no Google Maps
-dependency**:
+Turns two endpoints into a driving route — **entirely free and
+self-hosted, no Google Maps dependency**. Each endpoint can be either a
+free-text place name (`"Colombo"`) or a raw `"lat, lng"` coordinate pair
+(`"6.9271, 79.8612"`), in any combination:
+
+| From | To | Example |
+|---|---|---|
+| place name | place name | `origin=Colombo&destination=Galle` |
+| place name | lat, lng | `origin=Colombo&destination=6.0329,80.2168` |
+| lat, lng | place name | `origin=6.9271,79.8612&destination=Galle` |
+| lat, lng | lat, lng | `origin=6.9271,79.8612&destination=6.0329,80.2168` |
 
 1. Each place name is geocoded via the public **OSM Nominatim** API (no
-   API key).
+   API key). A `lat, lng` pair skips geocoding entirely and is used as-is.
 2. The shortest path between them is computed by **pgRouting's Dijkstra**
    implementation, running against this server's own Postgres database,
    over a routing graph built from the Sri Lanka OpenStreetMap road
@@ -347,8 +355,14 @@ dependency**:
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `origin` | string | Yes | Free-text starting place, e.g. `Colombo` |
-| `destination` | string | Yes | Free-text destination place, e.g. `Galle` |
+| `origin` | string | Yes | Starting point: a place name (`Colombo`) **or** `lat,lng` (`6.9271,79.8612`) |
+| `destination` | string | Yes | End point: a place name (`Galle`) **or** `lat,lng` (`6.0329,80.2168`) |
+
+**Coordinate format:** latitude first, then longitude, separated by a comma
+and/or whitespace. `6.9271,79.8612`, `6.9271, 79.8612`, `6.9271 79.8612` and
+`(6.9271,79.8612)` are all accepted. Latitude must be −90…90 and longitude
+−180…180. URL-encode the space/comma when building the URL by hand (or use
+`encodeURIComponent`). Negative values are fine.
 
 ### Response — 200 OK
 
@@ -373,10 +387,10 @@ dependency**:
 | Field | Type | Description |
 |---|---|---|
 | `distanceKm` | number | Total route distance in kilometers, rounded to 1 decimal |
-| `startAddress` | string | Full geocoded address of `origin`, from Nominatim |
-| `endAddress` | string | Full geocoded address of `destination`, from Nominatim |
-| `startLocation` | `{lat, lng}` | Geocoded coordinates of `origin` |
-| `endLocation` | `{lat, lng}` | Geocoded coordinates of `destination` |
+| `startAddress` | string | Full geocoded address of `origin` from Nominatim, or `"lat, lng"` if `origin` was given as coordinates |
+| `endAddress` | string | Full geocoded address of `destination` from Nominatim, or `"lat, lng"` if it was given as coordinates |
+| `startLocation` | `{lat, lng}` | Coordinates of `origin` (geocoded, or exactly what was sent) |
+| `endLocation` | `{lat, lng}` | Coordinates of `destination` (geocoded, or exactly what was sent) |
 | `geometry` | GeoJSON `LineString` | The route path, `[lng, lat]` pairs in WGS84 (EPSG:4326) |
 
 > **No ETA.** `distanceKm` is pure road length; there is no travel-time
@@ -388,6 +402,12 @@ dependency**:
 
 ```json
 { "error": "origin and destination query params are required." }
+```
+
+### Response — 400 (coordinates out of range)
+
+```json
+{ "error": "\"91, 10\" is not a valid latitude, longitude pair." }
 ```
 
 ### Response — 404 (place not found)
@@ -420,13 +440,31 @@ Can happen for places in genuinely disconnected parts of the network
 ### Example
 
 ```bash
+# place name -> place name
 curl "https://test.servefamily.com/api/directions?origin=Colombo&destination=Galle"
+
+# place name -> lat,lng   (-G + --data-urlencode handles the comma/space encoding)
+curl -G "https://test.servefamily.com/api/directions" \
+  --data-urlencode "origin=Colombo" \
+  --data-urlencode "destination=6.0329, 80.2168"
+
+# lat,lng -> place name
+curl -G "https://test.servefamily.com/api/directions" \
+  --data-urlencode "origin=6.9271, 79.8612" \
+  --data-urlencode "destination=Galle"
+
+# lat,lng -> lat,lng
+curl -G "https://test.servefamily.com/api/directions" \
+  --data-urlencode "origin=6.9271, 79.8612" \
+  --data-urlencode "destination=6.0329, 80.2168"
 ```
 
 ```javascript
-const res = await fetch(
-  `https://test.servefamily.com/api/directions?origin=${encodeURIComponent('Colombo')}&destination=${encodeURIComponent('Galle')}`
-);
+const params = new URLSearchParams({
+  origin: '6.9271, 79.8612',   // or 'Colombo'
+  destination: 'Galle'         // or '6.0329, 80.2168'
+});
+const res = await fetch(`https://test.servefamily.com/api/directions?${params}`);
 const route = await res.json();
 console.log(`${route.distanceKm} km from ${route.startAddress} to ${route.endAddress}`);
 ```
@@ -434,8 +472,15 @@ console.log(`${route.distanceKm} km from ${route.startAddress} to ${route.endAdd
 ### Rate limiting note
 
 Nominatim's usage policy caps free public use at roughly **1 request per
-second**. Each call to this endpoint makes 2 Nominatim requests (origin +
-destination), so avoid firing it in a tight loop.
+second**. Each *place name* endpoint costs one Nominatim request, so a
+name → name call makes 2, name ↔ coordinates makes 1, and coordinates →
+coordinates makes none. Avoid firing name-based calls in a tight loop.
+
+### Coordinates outside Sri Lanka
+
+Place names are biased to Sri Lanka, but raw coordinates are not checked. A
+point far outside the mapped area snaps to the nearest road node in the
+network, which can produce a misleading route rather than an error.
 
 ---
 
@@ -842,6 +887,157 @@ fetch(`${BASE_URL}/api/road-directions`)
   .then((res) => res.json())
   .then((roads) => console.log(`${roads.length} tagged roads`));
 ```
+
+---
+
+# 6. Accessing the Map Data on the Server
+
+The road map is the Sri Lanka OpenStreetMap extract
+(`sri-lanka-260910.osm.pbf`) imported into the server's own Postgres/PostGIS
+database (`geo_locations`). It is **not** served as map tiles or as a
+"download the whole map" endpoint. There are three ways to reach it,
+depending on what you need.
+
+| Need | Use | Section |
+|---|---|---|
+| Routes between two places/coordinates | `GET /api/directions` | [§1.6](#16-get-apidirections) |
+| Roads that people have tagged one-way/two-way | `GET /api/road-directions` | [§1.5](#15-get-apiroad-directions) |
+| The **raw** road network (every road, any area), export, GIS work | Direct database access over an SSH tunnel | [§6.2](#62-direct-database-access-raw-map-data) |
+| The original `.osm.pbf` file | `scp` from the server | [§6.3](#63-the-original-osmpbf-file) |
+
+> **Not currently exposed over HTTP:** the full `osm_roads` network, a
+> bounding-box road query, and map tiles. The `/map` page in the frontend
+> only draws the tagged subset (`/api/road-directions`) over public
+> OpenStreetMap tiles; the imported network is used server-side for routing
+> and trace matching. If an app needs the raw roads over HTTP, that needs a
+> new endpoint (e.g. `GET /api/roads?bbox=minLng,minLat,maxLng,maxLat`).
+
+## 6.1 Server access (SSH)
+
+| | |
+|---|---|
+| **Host** | `54.197.205.20` (as of 2026-09-20 — if this stops answering, check the current public IP in the AWS console; `test.servefamily.com` is the API hostname) |
+| **User** | `ubuntu` |
+| **Auth** | SSH key pair (`.pem` file). Keep it private and out of the repo. |
+| **App path** | `/home/ubuntu/location-socket-app-test` |
+| **Process** | PM2 process `location-backend` (`pm2 logs location-backend`, `pm2 restart location-backend`) |
+
+```bash
+ssh -i <path-to-key>.pem ubuntu@54.197.205.20
+```
+
+On Windows PowerShell the key path looks like `C:\Users\<you>\Downloads\test.pem`.
+
+## 6.2 Direct database access (raw map data)
+
+Postgres listens on `localhost` on the server only, so it is not reachable
+from the internet — and it should stay that way. Reach it through an SSH
+tunnel instead of opening port 5432.
+
+**1. Open the tunnel** (leave this window running):
+
+```bash
+ssh -i <path-to-key>.pem -N -L 5433:localhost:5432 ubuntu@54.197.205.20
+```
+
+Local port `5433` is used so it doesn't clash with a Postgres already
+running on your own machine.
+
+**2. Get the DB credentials** from the server's `backend/.env`
+(`DB_USER`, `DB_PASSWORD`, `DB_NAME` — the database is named
+`geo_locations` by default):
+
+```bash
+ssh -i <path-to-key>.pem ubuntu@54.197.205.20 "grep '^DB_' /home/ubuntu/location-socket-app-test/backend/.env"
+```
+
+**3. Connect** to `localhost:5433` with any Postgres/PostGIS client:
+
+```bash
+psql -h localhost -p 5433 -U <DB_USER> -d geo_locations
+```
+
+**QGIS:** Layer → Add Layer → PostGIS → New connection → host `localhost`,
+port `5433`, database `geo_locations`, then add `osm_roads`.
+
+### Tables you'll want
+
+| Table | What it is |
+|---|---|
+| `osm_roads` | Every OSM road: `way_id`, `name`, `highway`, `oneway`, `geom` (LineString, **SRID 3857**) |
+| `osm_roads_edges` | Routing graph edges (roads split at junctions) with `cost` / `reverse_cost` in meters |
+| `osm_roads_vertices_pgr` | Routing graph nodes (junctions) |
+| `road_direction_reports` | Crowdsourced one-way/two-way reports |
+| `locations` | Cached place-name → lat/lng lookups |
+
+Full column definitions are in §3. Note `geom` is stored in Web Mercator
+(3857), so transform to 4326 for lat/lng output and to compare against
+lat/lng input.
+
+### Example queries
+
+Roads inside a bounding box, as a GeoJSON FeatureCollection
+(`minLng, minLat, maxLng, maxLat` — here central Colombo):
+
+```sql
+SELECT jsonb_build_object(
+  'type', 'FeatureCollection',
+  'features', COALESCE(jsonb_agg(jsonb_build_object(
+    'type', 'Feature',
+    'id', way_id,
+    'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::jsonb,
+    'properties', jsonb_build_object('name', name, 'highway', highway, 'oneway', oneway)
+  )), '[]'::jsonb)
+)
+FROM osm_roads
+WHERE geom && ST_Transform(ST_MakeEnvelope(79.84, 6.90, 79.88, 6.95, 4326), 3857);
+```
+
+Nearest 5 roads to a lat/lng (distance is approximate — Web Mercator
+stretches meters by ~0.7% at Sri Lanka's latitude; the server's own 60 m
+trace-matching radius is measured the same way):
+
+```sql
+SELECT way_id, name, highway, oneway, ST_Distance(geom, p.g) AS distance_m
+FROM osm_roads,
+     (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(79.8612, 6.9271), 4326), 3857) AS g) p
+ORDER BY geom <-> p.g
+LIMIT 5;
+```
+
+All roads with a given name, or of a given class:
+
+```sql
+SELECT way_id, name, highway FROM osm_roads WHERE name ILIKE '%galle road%';
+SELECT count(*) FROM osm_roads WHERE highway IN ('motorway', 'trunk');
+```
+
+Export the whole network to a GeoJSON file (needs GDAL's `ogr2ogr`, with
+the tunnel from step 1 open):
+
+```bash
+ogr2ogr -f GeoJSON roads.geojson \
+  PG:"host=localhost port=5433 dbname=geo_locations user=<DB_USER> password=<DB_PASSWORD>" \
+  -t_srs EPSG:4326 osm_roads
+```
+
+> **Safety:** use a read-only mindset here. `osm_roads_edges` and
+> `osm_roads_vertices_pgr` are what `GET /api/directions` routes over;
+> editing or dropping them breaks routing until
+> `backend/sql/road_routing_topology.sql` is re-run.
+
+## 6.3 The original `.osm.pbf` file
+
+The imported extract is kept on the server (not in git) at
+`backend/map/sri-lanka-260910.osm.pbf` under the app path. To pull it down:
+
+```bash
+scp -i <path-to-key>.pem ubuntu@54.197.205.20:/home/ubuntu/location-socket-app-test/backend/map/sri-lanka-260910.osm.pbf .
+```
+
+To refresh the map from a newer extract (e.g. from Geofabrik), re-run the
+import steps in `backend/sql/road_directions.sql`, then rebuild the routing
+graph with `backend/sql/road_routing_topology.sql`.
 
 ---
 

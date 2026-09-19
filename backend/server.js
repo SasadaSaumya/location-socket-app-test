@@ -258,6 +258,36 @@ async function geocode(place) {
     return { lat: Number(hit.lat), lng: Number(hit.lon), address: hit.display_name };
 }
 
+// Matches "6.9271, 79.8612" / "6.9271 79.8612" / "(6.9271,79.8612)": two signed
+// decimals split by a comma and/or whitespace, in lat, lng order.
+const LAT_LNG_PATTERN = /^\(?\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*\)?$/;
+
+// Returns {lat, lng} if the text is a coordinate pair, null if it is just a
+// place name, and throws if it looks like coordinates but is out of range.
+function parseLatLng(text) {
+    const match = LAT_LNG_PATTERN.exec(text);
+    if (!match) return null;
+
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        const err = new Error(`"${text}" is not a valid latitude, longitude pair.`);
+        err.status = 400;
+        throw err;
+    }
+
+    return { lat, lng };
+}
+
+// A route endpoint can be typed either as a place name (geocoded through
+// Nominatim) or as raw "lat, lng" coordinates, which skip the geocoder.
+async function resolvePlace(text) {
+    const coords = parseLatLng(text);
+    if (coords) return { ...coords, address: `${coords.lat}, ${coords.lng}` };
+    return geocode(text);
+}
+
 // Nearest osm_roads_vertices_pgr node to a lat/lng, so a geocoded point
 // (which rarely sits exactly on a road) has a graph node to route from/to.
 async function nearestVertex(lat, lng) {
@@ -271,7 +301,8 @@ async function nearestVertex(lat, lng) {
     return result.rows[0] ? result.rows[0].id : null;
 }
 
-// Turns two free-text places (e.g. "Colombo" / "Galle") into a driving
+// Turns two free-text places (e.g. "Colombo" / "Galle") or "lat, lng" pairs
+// (e.g. "6.9271, 79.8612"), in any combination, into a driving
 // route, entirely on our own infrastructure: Nominatim (free OSM geocoder)
 // resolves the place names, then pgRouting's Dijkstra implementation finds
 // the shortest path over osm_roads_edges, a routing graph built from the
@@ -293,7 +324,7 @@ app.get('/api/directions', async (req, res) => {
     }
 
     try {
-        const [originPoint, destPoint] = await Promise.all([geocode(origin), geocode(destination)]);
+        const [originPoint, destPoint] = await Promise.all([resolvePlace(origin), resolvePlace(destination)]);
 
         if (!originPoint) {
             res.status(404).json({ error: `Could not find "${origin}".` });
@@ -343,6 +374,10 @@ app.get('/api/directions', async (req, res) => {
             geometry: JSON.parse(route.rows[0].geometry)
         });
     } catch (error) {
+        if (error.status === 400) {
+            res.status(400).json({ error: error.message });
+            return;
+        }
         console.error('error fetching directions:', error.message);
         res.status(500).json({ error: 'Failed to fetch directions.' });
     }

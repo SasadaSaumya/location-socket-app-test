@@ -182,23 +182,27 @@ function MapPage() {
           type="text"
           value={fromText}
           onChange={(e) => setFromText(e.target.value)}
-          placeholder="From e.g. Colombo"
+          placeholder="From: Colombo or 6.9271, 79.8612"
           autoComplete="off"
-          style={{ height: 32, width: 180 }}
+          style={{ height: 32, width: 240 }}
         />
         <span>to</span>
         <input
           type="text"
           value={toText}
           onChange={(e) => setToText(e.target.value)}
-          placeholder="To e.g. Galle"
+          placeholder="To: Galle or 6.0329, 80.2168"
           autoComplete="off"
-          style={{ height: 32, width: 180 }}
+          style={{ height: 32, width: 240 }}
         />
         <button type="submit" disabled={routeLoading} style={{ height: 36, padding: '0 16px' }}>
           {routeLoading ? 'Finding route...' : 'Show Route'}
         </button>
       </form>
+
+      <p style={{ margin: '0 0 8px', color: '#666', fontSize: 13 }}>
+        Each box takes a place name or coordinates as &quot;latitude, longitude&quot; &mdash; mix them any way you like.
+      </p>
 
       {routeError && <p style={{ color: 'red', margin: '4px 0' }}>{routeError}</p>}
       {routeInfo && (
