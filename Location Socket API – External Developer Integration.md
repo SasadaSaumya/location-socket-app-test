@@ -840,7 +840,13 @@ rather than the most recent submitter silently overriding everyone else.
 
 Used internally by `GET /api/directions` only — not exposed directly by
 any endpoint. Built from `osm_roads` by
-`backend/sql/road_routing_topology.sql`: each road is split into sub-edges
+`backend/sql/road_routing_topology.sql`, **vehicle roads only**: just
+`motorway`, `trunk`, `primary`, `secondary`, `tertiary` (each with its
+`_link` ramps), `unclassified`, `residential`, `living_street`, `service`
+and `road`. Footways, paths, steps, cycleways, pedestrian ways and tracks
+are in `osm_roads` but never in the routing graph, so routes can't use
+them. (Access tags such as `motor_vehicle=no` are not imported, so those
+aren't applied.) Each road is split into sub-edges
 at every point it actually shares with another road (not just its own
 endpoints), so pgRouting has a correct graph node at every real
 intersection. `cost` / `reverse_cost` are the segment length in meters,

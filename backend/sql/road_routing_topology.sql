@@ -25,6 +25,21 @@
 -- vertices in testing (the rest are genuinely disconnected fragments -
 -- ferry-only links, islands, private tracks - which is expected).
 --
+-- Vehicle-only: osm_roads holds every OSM way tagged highway=* (footways,
+-- steps, paths, cycleways, pedestrian bridges, farm tracks, ...), so the
+-- graph is built from only the classes a car can legally drive - see the
+-- highway IN (...) filter on road_points below. Everything downstream
+-- (junction vertices, edges, and the nearest-vertex snap in /api/directions)
+-- derives from road_points, so excluded ways never become routable and
+-- never provide a graph node for a typed point to snap to. The list keeps
+-- the *_link ramps (needed to get on/off motorways and trunk roads) and
+-- highway=road (OSM's "class not yet known" road). It deliberately leaves
+-- out highway=track: most tracks are farm/estate/forest roads, but if some
+-- you need are driveable, add 'track' to the list. Tag-level access
+-- restrictions (motor_vehicle=no, access=private) are NOT applied - the
+-- import in import_roads.lua only keeps name/highway/oneway - so a
+-- driveable-class road that is legally closed to cars can still route.
+--
 -- Re-run after re-importing osm_roads to rebuild the graph from scratch.
 -- The road_points/split_candidates/way_split_points intermediates are
 -- dropped at the end; only osm_roads_edges and osm_roads_vertices_pgr
@@ -39,7 +54,16 @@ SET max_parallel_workers_per_gather = 0;
 DROP TABLE IF EXISTS road_points;
 CREATE TABLE road_points AS
 SELECT way_id, (dp).path[1] AS idx, (dp).geom AS geom
-FROM (SELECT way_id, ST_DumpPoints(geom) AS dp FROM osm_roads) t;
+FROM (
+    SELECT way_id, ST_DumpPoints(geom) AS dp
+    FROM osm_roads
+    WHERE highway IN (
+        'motorway', 'motorway_link', 'trunk', 'trunk_link',
+        'primary', 'primary_link', 'secondary', 'secondary_link',
+        'tertiary', 'tertiary_link', 'unclassified', 'residential',
+        'living_street', 'service', 'road'
+    )
+) t;
 
 CREATE INDEX idx_road_points_way ON road_points (way_id, idx);
 CREATE INDEX idx_road_points_geom ON road_points USING GIST (geom);

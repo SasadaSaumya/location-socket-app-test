@@ -134,6 +134,18 @@ app.post('/api/config', (req, res) => {
 // user's one-way/two-way report against that road's OSM way id. Multiple
 // reports can exist for the same way, direction is resolved as a majority
 // vote below rather than trusting whichever report came in last.
+// osm_roads holds every highway=* way (footways, steps, cycleways, pedestrian
+// bridges, ...). One-way/two-way tagging and the tagged-roads map only make
+// sense for roads a vehicle can drive, so both queries below restrict to these
+// classes. Keep in sync with the highway IN (...) list in
+// backend/sql/road_routing_topology.sql, which builds the routing graph.
+const VEHICLE_HIGHWAYS = [
+    'motorway', 'motorway_link', 'trunk', 'trunk_link',
+    'primary', 'primary_link', 'secondary', 'secondary_link',
+    'tertiary', 'tertiary_link', 'unclassified', 'residential',
+    'living_street', 'service', 'road'
+];
+
 app.post('/api/road-trace', async (req, res) => {
     const points = Array.isArray(req.body && req.body.points) ? req.body.points : null;
     const direction = req.body && req.body.direction;
@@ -159,9 +171,10 @@ app.post('/api/road-trace', async (req, res) => {
             `SELECT way_id, name,
                     ST_Distance(geom, ST_Transform(ST_SetSRID(ST_GeomFromText($1), 4326), 3857)) AS distance_m
              FROM osm_roads
+             WHERE highway = ANY($2)
              ORDER BY geom <-> ST_Transform(ST_SetSRID(ST_GeomFromText($1), 4326), 3857)
              LIMIT 1`,
-            [lineWkt]
+            [lineWkt, VEHICLE_HIGHWAYS]
         );
 
         if (match.rows.length === 0 || match.rows[0].distance_m > MAX_MATCH_DISTANCE_M) {
@@ -218,7 +231,9 @@ app.get('/api/road-directions', async (req, res) => {
                  GROUP BY direction
                  ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
                  LIMIT 1
-             ) tally ON true`
+             ) tally ON true
+             WHERE r.highway = ANY($1)`,
+            [VEHICLE_HIGHWAYS]
         );
 
         res.json(
