@@ -135,11 +135,22 @@ UPDATE osm_roads_edges SET length_m = ST_Length(geom);
 
 -- oneway='-1' means the way is tagged against its digitised direction
 -- (forward blocked), 'yes'/'true'/'1' means reverse is blocked, anything
--- else is two-way. 1e9 acts as "effectively unroutable" rather than a hard
--- NULL so pgr_dijkstra can still ignore it without special-casing NULLs.
+-- else is two-way. A negative cost/reverse_cost is pgRouting's own documented
+-- sentinel for "this direction does not exist in the graph" - pgr_dijkstra
+-- drops it entirely rather than merely discouraging it, which matters
+-- whenever a blocked direction is someone's *only* way to reach a vertex
+-- (e.g. a short dead-end spur off a one-way road): with a hard block,
+-- pgr_dijkstra correctly returns no path (0 rows, which GET /api/directions
+-- already turns into a 404) instead of being forced to use the blocked
+-- direction anyway and returning a "route" whose cost is dominated by the
+-- placeholder value. An earlier version of this used a huge finite value
+-- (1e9) instead, on the theory that pgr_dijkstra would just avoid something
+-- that expensive - true only when a real alternative route exists; with no
+-- alternative, dijkstra still returned it, producing routes with a
+-- ~1,000,000 km distanceKm. -1 is used here (any negative works).
 UPDATE osm_roads_edges
-SET cost = CASE WHEN oneway = '-1' THEN 1e9 ELSE length_m END,
-    reverse_cost = CASE WHEN oneway IN ('yes', 'true', '1') THEN 1e9 ELSE length_m END;
+SET cost = CASE WHEN oneway = '-1' THEN -1 ELSE length_m END,
+    reverse_cost = CASE WHEN oneway IN ('yes', 'true', '1') THEN -1 ELSE length_m END;
 
 DROP TABLE IF EXISTS road_points;
 DROP TABLE IF EXISTS split_candidates;

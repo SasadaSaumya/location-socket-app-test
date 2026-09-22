@@ -147,18 +147,22 @@ const VEHICLE_HIGHWAYS = [
 ];
 
 // Maps a resolved direction straight onto the cost/reverse_cost convention
-// osm_roads_edges already uses (see road_routing_topology.sql): 1e9 acts as
-// "effectively unroutable" in that direction, plain length_m means open.
-// cost is the "forward" direction (source -> target, i.e. the same order as
-// the way's own digitized geometry), reverse_cost is against it - matching
+// osm_roads_edges already uses (see road_routing_topology.sql): a negative
+// value is pgRouting's own sentinel for "this direction isn't part of the
+// graph" - pgr_dijkstra drops it entirely rather than merely discouraging
+// it, so a blocked direction that's someone's only way to reach a vertex
+// correctly comes back as no route (0 rows) instead of a "route" that
+// silently uses it anyway. Plain length_m means open. cost is the "forward"
+// direction (source -> target, i.e. the same order as the way's own
+// digitized geometry), reverse_cost is against it - matching
 // relative_direction below exactly. Used to build the UPDATE in
 // applyConsensusToRoutingGraph.
 const EDGE_COST_SQL = {
     two_way: { cost: 'length_m', reverse_cost: 'length_m' },
     // forward allowed, backward (reverse) blocked
-    forward: { cost: 'length_m', reverse_cost: '1e9' },
+    forward: { cost: 'length_m', reverse_cost: '-1' },
     // backward (reverse) allowed, forward blocked
-    backward: { cost: '1e9', reverse_cost: 'length_m' }
+    backward: { cost: '-1', reverse_cost: 'length_m' }
 };
 
 // Pushes a way's community consensus onto the actual routing graph, so a

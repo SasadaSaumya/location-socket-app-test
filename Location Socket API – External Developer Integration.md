@@ -868,9 +868,15 @@ them. (Access tags such as `motor_vehicle=no` are not imported, so those
 aren't applied.) Each road is split into sub-edges
 at every point it actually shares with another road (not just its own
 endpoints), so pgRouting has a correct graph node at every real
-intersection. `cost` / `reverse_cost` are the segment length in meters,
-inflated to an effectively-unroutable `1e9` in whichever direction is
-blocked.
+intersection. `cost` / `reverse_cost` are the segment length in meters, or
+`-1` in whichever direction is blocked — pgRouting's own documented
+sentinel for "this direction isn't part of the graph," which makes
+`pgr_dijkstra` drop it entirely rather than merely discourage it. That
+matters whenever the blocked direction is the *only* way to reach a vertex
+(e.g. a short dead-end spur off a one-way road): with a hard block,
+`GET /api/directions` correctly returns "no route found" instead of a
+"route" that uses the blocked direction anyway because it was
+technically-cheaper-than-nothing.
 
 That value starts out from the OSM `oneway` tag when the graph is built
 (or rebuilt — a manual step, see `backend/sql/road_routing_topology.sql`'s
