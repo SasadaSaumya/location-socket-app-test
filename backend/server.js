@@ -146,6 +146,71 @@ const VEHICLE_HIGHWAYS = [
     'living_street', 'service', 'road'
 ];
 
+// Maps a resolved direction straight onto the cost/reverse_cost convention
+// osm_roads_edges already uses (see road_routing_topology.sql): 1e9 acts as
+// "effectively unroutable" in that direction, plain length_m means open.
+// cost is the "forward" direction (source -> target, i.e. the same order as
+// the way's own digitized geometry), reverse_cost is against it - matching
+// relative_direction below exactly. Used to build the UPDATE in
+// applyConsensusToRoutingGraph.
+const EDGE_COST_SQL = {
+    two_way: { cost: 'length_m', reverse_cost: 'length_m' },
+    // forward allowed, backward (reverse) blocked
+    forward: { cost: 'length_m', reverse_cost: '1e9' },
+    // backward (reverse) allowed, forward blocked
+    backward: { cost: '1e9', reverse_cost: 'length_m' }
+};
+
+// Pushes a way's community consensus onto the actual routing graph, so a
+// one-way report doesn't just sit in road_direction_reports as a label
+// nobody acts on (which is what GET /api/directions was doing before this -
+// its cost/reverse_cost only ever came from OSM's own oneway tag, baked in
+// once when road_routing_topology.sql was last run, see the comment on
+// GET /api/directions below). Runs after every report, using the same
+// majority vote already computed for the response:
+//   - consensus 'two_way' opens both directions, overriding any earlier
+//     one-way block for this way now that two-way has the votes.
+//   - consensus 'one_way' blocks whichever direction the majority of
+//     one-way reporters (the ones with a known relative_direction) say is
+//     NOT the way to drive it. If no one-way report for this way has a
+//     known relative_direction yet (all predate the relative_direction
+//     migration, or every trace was too short/degenerate to tell), there's
+//     nothing to act on - the edges are left as they are rather than
+//     guessed.
+// Failures here are logged, not thrown: osm_roads_edges only exists where
+// backend/sql/road_routing_topology.sql has been run (e.g. not on a bare
+// local dev DB), and a routing-graph hiccup shouldn't fail the trace
+// submission itself.
+async function applyConsensusToRoutingGraph(osmWayId, consensus) {
+    try {
+        let relativeDirection = null;
+        if (consensus === 'one_way') {
+            const dirTally = await db.query(
+                `SELECT relative_direction
+                 FROM road_direction_reports
+                 WHERE osm_way_id = $1 AND direction = 'one_way' AND relative_direction IS NOT NULL
+                 GROUP BY relative_direction
+                 ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
+                 LIMIT 1`,
+                [osmWayId]
+            );
+            if (dirTally.rows.length === 0) return;
+            relativeDirection = dirTally.rows[0].relative_direction;
+        }
+
+        const { cost, reverse_cost: reverseCost } = consensus === 'two_way'
+            ? EDGE_COST_SQL.two_way
+            : EDGE_COST_SQL[relativeDirection];
+
+        await db.query(
+            `UPDATE osm_roads_edges SET cost = ${cost}, reverse_cost = ${reverseCost} WHERE osm_way_id = $1`,
+            [osmWayId]
+        );
+    } catch (error) {
+        console.error(`[road-trace] could not update routing graph for way ${osmWayId}:`, error.message);
+    }
+}
+
 app.post('/api/road-trace', async (req, res) => {
     const points = Array.isArray(req.body && req.body.points) ? req.body.points : null;
     const direction = req.body && req.body.direction;
@@ -185,9 +250,37 @@ app.post('/api/road-trace', async (req, res) => {
 
         const { way_id: osmWayId, name, distance_m: distanceM } = match.rows[0];
 
+        // Only meaningful for a one-way report: which way along the matched
+        // way's own digitized geometry (osm_roads.geom's point order) the
+        // reporter actually drove. ST_LineLocatePoint gives each point's
+        // fractional position (0 = the way's start, 1 = its end) along that
+        // geometry; points[0] -> points[last] is the direction the reporter
+        // says traffic is allowed to move, so comparing their fractions says
+        // whether that's the same way the geometry runs (forward) or against
+        // it (backward). Left null (rather than guessed) on a degenerate
+        // trace whose start and end land on the same point of the road -
+        // this report still counts toward the one_way/two_way tally below,
+        // it just can't vote on which direction to block.
+        let relativeDirection = null;
+        if (direction === 'one_way') {
+            const first = points[0];
+            const last = points[points.length - 1];
+            const frac = await db.query(
+                `SELECT
+                    ST_LineLocatePoint(geom, ST_Transform(ST_SetSRID(ST_MakePoint($2, $3), 4326), 3857)) AS start_frac,
+                    ST_LineLocatePoint(geom, ST_Transform(ST_SetSRID(ST_MakePoint($4, $5), 4326), 3857)) AS end_frac
+                 FROM osm_roads WHERE way_id = $1`,
+                [osmWayId, first.lng, first.lat, last.lng, last.lat]
+            );
+            const { start_frac: startFrac, end_frac: endFrac } = frac.rows[0];
+            if (startFrac !== endFrac) {
+                relativeDirection = endFrac > startFrac ? 'forward' : 'backward';
+            }
+        }
+
         await db.query(
-            'INSERT INTO road_direction_reports (osm_way_id, direction, distance_m) VALUES ($1, $2, $3)',
-            [osmWayId, direction, distanceM]
+            'INSERT INTO road_direction_reports (osm_way_id, direction, relative_direction, distance_m) VALUES ($1, $2, $3, $4)',
+            [osmWayId, direction, relativeDirection, distanceM]
         );
 
         const tally = await db.query(
@@ -199,6 +292,9 @@ app.post('/api/road-trace', async (req, res) => {
             [osmWayId]
         );
 
+        const consensus = tally.rows[0].direction;
+        await applyConsensusToRoutingGraph(osmWayId, consensus);
+
         console.log(`[road-trace] matched "${name}" (way ${osmWayId}), ${distanceM.toFixed(1)}m away`);
 
         res.json({
@@ -206,7 +302,7 @@ app.post('/api/road-trace', async (req, res) => {
             osmWayId,
             name: name || null,
             distanceM,
-            consensus: tally.rows[0].direction,
+            consensus,
             reportCount: tally.rows.reduce((sum, row) => sum + Number(row.count), 0)
         });
     } catch (error) {
@@ -218,11 +314,21 @@ app.post('/api/road-trace', async (req, res) => {
 // Every road that has at least one direction report, with its geometry, so
 // the mobile app can render already-tagged roads on the map. Aggregation
 // mirrors the majority-vote logic in POST /api/road-trace above.
+//
+// oneWayDirection ('forward' | 'backward' | null) is the same relative-to-
+// the-way's-own-geometry direction applyConsensusToRoutingGraph uses to
+// block a direction in the routing graph (see POST /api/road-trace); it's
+// only meaningful when consensus is 'one_way', and can still be null there
+// (no one-way report for this road has a known relative_direction yet). Left
+// as a separate LEFT JOIN LATERAL rather than folded into the tally above so
+// a road whose one-way reports all predate the relative_direction migration
+// still shows up with consensus 'one_way' instead of silently dropping out.
 app.get('/api/road-directions', async (req, res) => {
     try {
         const result = await db.query(
             `SELECT r.way_id, r.name, ST_AsGeoJSON(ST_Transform(r.geom, 4326)) AS geometry,
-                    tally.direction AS consensus, tally.report_count
+                    tally.direction AS consensus, tally.report_count,
+                    dir_tally.relative_direction AS one_way_direction
              FROM osm_roads r
              JOIN LATERAL (
                  SELECT direction, COUNT(*) AS report_count, MAX(reported_at) AS last_reported_at
@@ -232,6 +338,14 @@ app.get('/api/road-directions', async (req, res) => {
                  ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
                  LIMIT 1
              ) tally ON true
+             LEFT JOIN LATERAL (
+                 SELECT relative_direction
+                 FROM road_direction_reports
+                 WHERE osm_way_id = r.way_id AND direction = 'one_way' AND relative_direction IS NOT NULL
+                 GROUP BY relative_direction
+                 ORDER BY COUNT(*) DESC, MAX(reported_at) DESC
+                 LIMIT 1
+             ) dir_tally ON tally.direction = 'one_way'
              WHERE r.highway = ANY($1)`,
             [VEHICLE_HIGHWAYS]
         );
@@ -242,6 +356,7 @@ app.get('/api/road-directions', async (req, res) => {
                 name: row.name,
                 geometry: JSON.parse(row.geometry),
                 consensus: row.consensus,
+                oneWayDirection: row.one_way_direction || null,
                 reportCount: Number(row.report_count)
             }))
         );
@@ -326,9 +441,14 @@ async function nearestVertex(lat, lng) {
 // every real shared OSM node, not just each road's own endpoints -
 // otherwise a road that simply passes through a junction (the common case)
 // never gets a graph node there. See backend/sql/road_routing_topology.sql.
-// cost/reverse_cost were derived from geometry length and the OSM oneway
-// tag, so a one-way street the wrong direction is simply very expensive to
-// traverse rather than hard-blocked.
+// cost/reverse_cost start out derived from geometry length and the OSM
+// oneway tag when the graph is (re)built (road_routing_topology.sql), so a
+// one-way street the wrong direction is simply very expensive to traverse
+// rather than hard-blocked. From then on, POST /api/road-trace keeps them
+// current with whatever the community has actually reported for a way
+// (majority vote, see applyConsensusToRoutingGraph above) - so a road
+// tagged one-way through the app affects routes immediately, without
+// needing the graph rebuilt.
 app.get('/api/directions', async (req, res) => {
     const origin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
     const destination = typeof req.query.destination === 'string' ? req.query.destination.trim() : '';

@@ -16,6 +16,15 @@ CREATE TABLE IF NOT EXISTS road_direction_reports (
     id SERIAL PRIMARY KEY,
     osm_way_id BIGINT NOT NULL,
     direction VARCHAR(10) NOT NULL CHECK (direction IN ('one_way', 'two_way')),
+    -- Only set when direction = 'one_way'. Which way the reporter actually
+    -- drove, relative to the matched OSM way's own digitized geometry
+    -- direction (osm_roads.geom's point order): 'forward' means the trace
+    -- ran the same way as the geometry (start -> end), 'backward' means
+    -- against it. This is what lets POST /api/road-trace turn a one-way
+    -- report into an actual direction-blocking cost on osm_roads_edges
+    -- instead of just a label nobody acts on - see the migration note in
+    -- backend/sql/road_direction_relative.sql if this table already exists.
+    relative_direction VARCHAR(10) CHECK (relative_direction IN ('forward', 'backward')),
     distance_m DOUBLE PRECISION,
     reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -180,6 +180,15 @@ report the same road; the server resolves conflicts by majority vote
 rather than trusting whichever report arrived most recently (see
 `GET /api/road-directions` for how the tally is read back).
 
+As of the current majority-vote result, this endpoint also updates the
+routing graph `GET /api/directions` uses (`osm_roads_edges.cost` /
+`reverse_cost`) so a road's one-way/two-way status affects driving
+directions immediately — no separate rebuild step. `points` order matters
+for this: for a one-way report, the direction of travel is taken to be
+`points[0]` → `points[last]`, compared against the matched road's own
+OpenStreetMap digitized direction, to know *which* direction to block. See
+§3.4.
+
 **Auth:** none
 **Content-Type:** `application/json`
 **Match radius:** 60 meters — a trace that doesn't come within 60m of any
@@ -200,7 +209,7 @@ known road is reported as unmatched rather than guessed.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `points` | array of `{lat, lng}` | Yes | At least 2 GPS points forming the traveled path, in order |
+| `points` | array of `{lat, lng}` | Yes | At least 2 GPS points forming the traveled path, in order. For a one-way report, `points[0]` is treated as where the caller started driving and `points[last]` as where they ended up — that order is what decides which direction gets blocked in the routing graph |
 | `direction` | `"one_way"` \| `"two_way"` | Yes | What the caller observed while driving this road |
 
 ### Response — 200 OK (matched)
@@ -293,6 +302,7 @@ used internally by `GET /api/directions`).
             ]
         },
         "consensus": "one_way",
+        "oneWayDirection": "forward",
         "reportCount": 3
     }
 ]
@@ -302,8 +312,9 @@ used internally by `GET /api/directions`).
 |---|---|---|
 | `osmWayId` | string | OpenStreetMap way ID |
 | `name` | string \| null | Road name from OSM |
-| `geometry` | GeoJSON `LineString` | Road path, `[lng, lat]` pairs in WGS84 (EPSG:4326) |
+| `geometry` | GeoJSON `LineString` | Road path, `[lng, lat]` pairs in WGS84 (EPSG:4326), in OSM's own digitized point order |
 | `consensus` | `"one_way"` \| `"two_way"` | Current majority-vote direction |
+| `oneWayDirection` | `"forward"` \| `"backward"` \| `null` | Only meaningful when `consensus` is `"one_way"`. Which way along `geometry`'s own point order is open: `"forward"` means travel the same way the coordinates are listed, `"backward"` means the reverse. `null` if every one-way report for this road predates direction tracking, or its direction couldn't be determined — the road is still one-way, just not known which way yet |
 | `reportCount` | number | Number of reports backing the winning direction |
 
 ### Response — 500
@@ -346,8 +357,12 @@ free-text place name (`"Colombo"`) or a raw `"lat, lng"` coordinate pair
    implementation, running against this server's own Postgres database,
    over a routing graph built from the Sri Lanka OpenStreetMap road
    network (see `backend/sql/road_routing_topology.sql`).
-3. Each road's OSM `oneway` tag is baked into the graph as a direction
-   cost, so the route respects one-way streets.
+3. Each road's cost respects one-way streets. It starts out from that
+   road's OSM `oneway` tag when the graph is built, then `POST
+   /api/road-trace` keeps it current with whatever the community has
+   actually reported for that road (majority vote) — so a road tagged
+   one-way through the app affects routes right away, without needing the
+   graph rebuilt. See §3.4.
 
 **Auth:** none
 
@@ -828,6 +843,7 @@ Imported via `osm2pgsql` — see `backend/sql/road_directions.sql` and
 | `id` | serial | Primary key |
 | `osm_way_id` | bigint | References `osm_roads.way_id` |
 | `direction` | text | `'one_way'` or `'two_way'` |
+| `relative_direction` | text \| null | Only set when `direction = 'one_way'`: `'forward'` or `'backward'`, which way the reporter actually drove relative to the matched road's own OSM digitized point order (`osm_roads.geom`). Computed from the submitted `points`' order — see §1.4. `null` for `'two_way'` rows, and for `'one_way'` rows where it couldn't be determined |
 | `distance_m` | double precision | Distance from the submitted trace to the matched road |
 | `reported_at` | timestamp | Defaults to insert time |
 
@@ -835,6 +851,9 @@ Append-only — every report is kept, not just the latest. The "current"
 direction for a road is always resolved as a majority vote over this
 table (see §1.4 / §1.5), so conflicting reports self-correct over time
 rather than the most recent submitter silently overriding everyone else.
+`relative_direction` gets its own, narrower majority vote (one-way reports
+only) to decide which direction `POST /api/road-trace` blocks in the
+routing graph — see §3.4.
 
 ## 3.4 `osm_roads_edges` / `osm_roads_vertices_pgr` (routing graph)
 
@@ -850,8 +869,23 @@ aren't applied.) Each road is split into sub-edges
 at every point it actually shares with another road (not just its own
 endpoints), so pgRouting has a correct graph node at every real
 intersection. `cost` / `reverse_cost` are the segment length in meters,
-inflated to an effectively-unroutable `1e9` in whichever direction the
-OSM `oneway` tag disallows.
+inflated to an effectively-unroutable `1e9` in whichever direction is
+blocked.
+
+That value starts out from the OSM `oneway` tag when the graph is built
+(or rebuilt — a manual step, see `backend/sql/road_routing_topology.sql`'s
+header), and from then on `POST /api/road-trace` overwrites it, per way,
+every time a new report changes that way's majority-vote consensus: a
+`'two_way'` consensus opens both directions, a `'one_way'` consensus with a
+known `relative_direction` blocks the other one. **This means a road's
+`highway` class matters**: only the vehicle classes above ever get an
+`osm_roads_edges` row at all, so tagging a footway/path/track one-way
+through `POST /api/road-trace` is a no-op on routing — there's no edge for
+it to update, only the raw `road_direction_reports` row and the
+`GET /api/road-directions` overlay reflect it. (`POST /api/road-trace`
+itself already restricts matching to the same vehicle classes, so this
+only comes up if that list and `road_routing_topology.sql`'s ever drift
+apart — they're meant to be kept identical.)
 
 ---
 

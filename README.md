@@ -181,11 +181,22 @@ CREATE TABLE road_direction_reports (
     id SERIAL PRIMARY KEY,
     osm_way_id BIGINT NOT NULL,
     direction VARCHAR(10) NOT NULL CHECK (direction IN ('one_way', 'two_way')),
+    relative_direction VARCHAR(10) CHECK (relative_direction IN ('forward', 'backward')),
     distance_m DOUBLE PRECISION,
     reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 `idx_road_reports_way` and a GiST index on `osm_roads.geom` (`idx_osm_roads_geom`) make both the per-way lookup and the nearest-neighbor match fast.
+
+`relative_direction` (only set on `one_way` reports) records which way the
+reporter actually drove, relative to the matched road's own OSM digitized
+direction — see the "External Developer Integration" doc §1.4/§3.3/§3.4 for
+how `POST /api/road-trace` derives it and uses it to actually block that
+direction in the `GET /api/directions` routing graph
+(`osm_roads_edges`/`osm_roads_vertices_pgr`, built by
+`backend/sql/road_routing_topology.sql` — not otherwise documented in this
+README yet). If this column doesn't exist on an existing database, run
+`backend/sql/road_direction_relative.sql` once to add it.
 
 ---
 
